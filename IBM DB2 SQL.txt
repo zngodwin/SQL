@@ -1,0 +1,216 @@
+library(ibmdbR)
+
+dsn_driver <- c("BLUDB")
+dsn_database <- c("BLUDB")
+dsn_hostname <- c("Yout Host Name")
+dsn_port <- "50000"
+dsn_protocol <- "TCPIP"
+dsn_uid <- c("Your user name")
+dsn_pwd <- c("Your Password")
+
+conn_path <- paste(dsn_driver,  
+                   ";DATABASE=",dsn_database,
+                   ";HOSTNAME=",dsn_hostname,
+                   ";PORT=",dsn_port,
+                   ";PROTOCOL=",dsn_protocol,
+                   ";UID=",dsn_uid,
+                   ";PWD=",dsn_pwd,sep="")
+mycon <- idaConnect(conn_path) 
+idaInit(mycon)
+
+#Read the data from database
+SENTIMENT <- idaQuery("SELECT * from AIRLINE_SENTIMENT")
+
+#Check the row counts
+nrow(SENTIMENT)
+idadf(mycon, "SELECT count(*) FROM AIRLINE_SENTIMENT")
+
+#List the database tables
+idaShowTables()
+#List the database tables that contain AIR in the name
+idaShowTables(matchStr='AIR')
+#To check if the table exists
+idaExistTable('AIRLINE_SENTIMENT')
+
+#number of tweets per sentiment
+table(SENTIMENT$AIRLINE_SENTIMENT)
+idadf(mycon, "SELECT AIRLINE_SENTIMENT, 
+      count(1) COUNT 
+      FROM AIRLINE_SENTIMENT 
+      GROUP BY AIRLINE_SENTIMENT")
+
+#number of tweets per airline
+table(SENTIMENT$AIRLINE)
+
+#number of tweets per sentiment by airline
+table(SENTIMENT$AIRLINE, SENTIMENT$AIRLINE_SENTIMENT)
+
+#Number of tweets by airline per negative reason
+table(SENTIMENT$NEGATIVEREASON, SENTIMENT$AIRLINE)
+
+#Pie charts
+#Reset the margin
+par(mar=c(1,1,1,1))
+#Use default colors
+pie (table(SENTIMENT$AIRLINE))
+#Change colors
+pie (table(SENTIMENT$AIRLINE), col=c("blue", "yellow", "green", "purple", "pink", "orange"))
+
+#load the plyr package
+library("plyr")
+#List the most common complaints
+reasonCounts<-na.omit(plyr::count(SENTIMENT$NEGATIVEREASON))
+reasonCounts<-reasonCounts[order(reasonCounts$freq, decreasing=TRUE), ]
+reasonCounts
+
+# Using ggplot2 package
+# Complaints frequency plot
+library(ggplot2)
+wf <- data.frame(reasonCounts)
+p <- ggplot(wf, aes(wf$x, wf$freq))
+p <- p + geom_bar(stat="identity")
+p <- p + theme(axis.text.x=element_text(angle=45, hjust=1))
+p
+
+
+
+#Number of retweets per negative reason
+ddply(SENTIMENT, ~ NEGATIVEREASON, summarize, numRetweets = sum(RETWEET_COUNT, na.rm = TRUE))
+
+#Posts that have 6 retweets
+as.character(subset(SENTIMENT, RETWEET_COUNT ==6)$TEXT)
+
+#number of posts per day
+posts<-as.Date(SENTIMENT$TWEET_CREATED, tryFormats = c("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"),optional = FALSE)
+table(posts)
+#day with the maximum number of posts
+table(posts)[which.max(table(posts))]
+
+#number of posts per day by sentiment plot
+library (dplyr)
+drs <- idadf(mycon, "SELECT TWEET_CREATED, AIRLINE_SENTIMENT
+             FROM AIRLINE_SENTIMENT")
+drs$TWEET_CREATED<- as.Date(drs$TWEET_CREATED, tryFormats = c("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"),optional = FALSE)
+# Calculate and plot number of tweets per day by airline
+ByDateBySent <- drs %>% group_by(AIRLINE_SENTIMENT,TWEET_CREATED) %>% dplyr::summarise(count = n())
+ByDateBySentPlot = ggplot() + geom_line(data=ByDateBySent, aes(x=TWEET_CREATED, y=count, group =AIRLINE_SENTIMENT , color=AIRLINE_SENTIMENT)) 
+ByDateBySentPlot
+
+#Apriori rules method
+dfa<-SENTIMENT[ , c('AIRLINE', 'AIRLINE_SENTIMENT',  'NEGATIVEREASON',  'RETWEET_COUNT', 'USER_TIMEZONE')]
+dfa$AIRLINE<-as.factor(dfa$AIRLINE)
+dfa$AIRLINE_SENTIMENT<-as.factor(dfa$AIRLINE_SENTIMENT)
+dfa$NEGATIVEREASON<-as.factor(dfa$NEGATIVEREASON)
+dfa$USER_TIMEZONE<-as.factor(dfa$USER_TIMEZONE)
+
+dfa$RETWEET_COUNT<-cut(dfa$RETWEET_COUNT, breaks=c(0, 1, 2, Inf), right=F, labels=c("0", "1",  "2+"))
+
+rules<-apriori(dfa)
+arules::inspect(rules[1:15])
+
+
+#Text Mining
+#install SnowballC for stemming.  Do it only once.
+install.packages("SnowballC")
+
+#Load the packages in memory
+library("tm")
+library("wordcloud")
+library ("SnowballC")
+
+#Load the tweets with positive sentiment into the data frame positive
+positive <- idadf(mycon, "SELECT 
+                  TEXT FROM AIRLINE_SENTIMENT 
+                  WHERE AIRLINE_SENTIMENT.AIRLINE_SENTIMENT='positive'")
+
+
+docs<-VectorSource(positive$TEXT)
+docs<-Corpus(docs)
+inspect(docs[[1]])
+inspect(docs[[2]])
+inspect(docs[[20]])
+
+#Strip the white space
+docs <- tm_map(docs, stripWhitespace)
+
+#Remove the URLs
+removeURL <- function(x) gsub("http[^[:space:]]*", "", x)
+docs <- tm_map(docs, content_transformer(removeURL))
+
+#Remove non ASCII character
+removeInvalid<-function(x) gsub("[^\x01-\x7F]", "", x)
+docs <- tm_map(docs, content_transformer(removeInvalid))
+
+#Remove punctuation
+docs <- tm_map(docs, removePunctuation)
+
+#remove the numbers
+docs <- tm_map(docs, removeNumbers)
+docs <- tm_map(docs, tolower)
+
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+docs <- tm_map(docs, toSpace, "@")   #Remove @
+docs <- tm_map(docs, toSpace, "/")   #Remove /
+docs <- tm_map(docs, toSpace, "\\|") #Remove |
+
+
+#Remove the stop word
+docs <- tm_map(docs, removeWords, stopwords("english"))
+docs <- tm_map(docs, removeWords, stopwords("SMART"))
+
+
+docs <- tm_map(docs, stemDocument)
+
+
+#Remove the white space introduced during the pre-processing
+docs <- tm_map(docs, stripWhitespace)
+dtm <- DocumentTermMatrix(docs)
+
+m <- as.matrix(dtm)   #Convert dtm to a matrix
+dim(m)                # Display number of terms and number of documents
+View(m[1:10, 1:10])   # Preview the first 10 rows and the first 10 columns in m
+
+#find the terms that appear at least 50 times
+findFreqTerms(dtm, lowfreq=50)
+#find the terms asosciated with good and great with correlation at least 0.15
+findAssocs(dtm, c("great", "good"), corlimit=0.15)
+
+dtms <- removeSparseTerms(dtm, 0.6) # Prepare the data (max 60% empty space)   
+freq <- colSums(as.matrix(dtm)) # Find word frequencies   
+dark2 <- brewer.pal(6, "Dark2")   
+wordcloud(names(freq), freq, min.freq=35, max.words=100, rot.per=0.2, scale=c(0.9, 0.9), colors=dark2)    
+
+# Terms Cluster dendogram
+library("cluster")
+
+dtms <- removeSparseTerms(dtm, 0.98)    #Remove sparse terms
+d <- dist(t(dtms), method="euclidian")  #Build the dissimilarity matrix
+fit <- hclust(d=d, method="ward.D2")
+plot(fit, hang=-1)
+
+#Network of terms
+library ("igraph")
+tdm<-TermDocumentMatrix(docs)              # Term document matrix
+tdm <- removeSparseTerms(tdm, 0.96)        # Remove sparse terms
+termDocMatrix <- as.matrix(tdm)            # Convert tdm to matrix
+
+termDocMatrix[termDocMatrix>=1] <- 1       # Set non-zero entries to 1 (1=term present, 0=term absent)
+termMatrix <- termDocMatrix %*% t(termDocMatrix)   
+View (termMatrix)
+
+g <- graph.adjacency(termMatrix, weighted=T, mode="undirected")
+g <- simplify(g)                 # Remove the self-relationships
+# V(g) is a graph vertex
+V(g)$label <- V(g)$name          # Label each vertex with a term
+V(g)$degree <- degree(g)
+set.seed(3952)
+
+plot(g, layout=layout.fruchterman.reingold(g), vertex.color="cyan")
+plot(g, layout=layout_with_gem(g), vertex.color="pink")
+plot(g, layout=layout_as_star(g), vertex.color="yellow", vertex.shape="square")
+plot(g, layout=layout_on_sphere(g), vertex.color="magenta")
+plot(g, layout=layout_randomly(g), vertex.size=10)
+plot(g, layout=layout_in_circle(g), vertex.color="pink", vertex.size=35)
+plot(g, layout=layout_nicely(g), vertex.color="plum", vertex.size=25)
+plot(g, layout=layout_on_grid(g), vertex.color="green", vertex.size=20)
+plot(g, layout=layout_as_tree(g), vertex.color="brown", vertex.size=20)
